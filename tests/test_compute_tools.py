@@ -12,10 +12,11 @@ import pytest
 from evo.compute.client import JobClient
 from evo.compute.tasks import run as run_sdk_compute
 from evo.compute.tasks.common import Filter
+from evo.compute.tasks.geostatistics.conditioned_simulator import ConSimParameters, ConSimResult, ConSimResultModel
 from evo.compute.tasks.geostatistics.idw import IDWParameters
 from evo.compute.tasks.geostatistics.knn import KNNParameters
 from evo.compute.tasks.geostatistics.kriging import KrigingParameters
-from evo.objects.typed import Attribute, PendingAttribute, PointSet, Regular3DGrid, Variogram
+from evo.objects.typed import Attribute, PendingAttribute, PointSet, Regular3DGrid, RegularMasked3DGrid, Variogram
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.exceptions import ValidationError as InvalidArguments
@@ -23,11 +24,19 @@ from pydantic import ValidationError
 
 from evo_mcp.tools import compute_tools
 from evo_mcp.utils import compute_helpers
-from evo_mcp.utils.compute_params import IDWBuildParams, KNNBuildParams, KrigingBuildParams
+from evo_mcp.utils.compute_params import (
+    ConSimBuildParams,
+    ConSimDistributionInput,
+    IDWBuildParams,
+    KNNBuildParams,
+    KrigingBuildParams,
+)
 from evo_mcp.utils.tool_support import MCPFeedback
 
 
 def test_compute_build_parameter_imports_remain_compatible():
+    assert compute_tools.ConSimBuildParams is ConSimBuildParams
+    assert compute_tools.ConSimDistributionInput is ConSimDistributionInput
     assert compute_tools.IDWBuildParams is IDWBuildParams
     assert compute_tools.KNNBuildParams is KNNBuildParams
     assert compute_tools.KrigingBuildParams is KrigingBuildParams
@@ -200,11 +209,16 @@ def estimation_result(compute_server, attribute="estimate"):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", ["kriging", "idw", "knn"])
+@pytest.mark.parametrize("name", ["kriging", "idw", "knn", "consim"])
 async def test_compute_uses_sdk_dispatch(
-    compute_server, kriging_build_inputs, neighborhood_build_inputs, monkeypatch, name
+    compute_server, kriging_build_inputs, neighborhood_build_inputs, consim_build_inputs, monkeypatch, name
 ):
-    inputs = {"kriging": kriging_build_inputs, "idw": neighborhood_build_inputs, "knn": neighborhood_build_inputs}[name]
+    inputs = {
+        "kriging": kriging_build_inputs,
+        "idw": neighborhood_build_inputs,
+        "knn": neighborhood_build_inputs,
+        "consim": consim_build_inputs,
+    }[name]
     rotation = {"dip_azimuth": 45.0, "dip": 30.0, "pitch": 10.0}
     condition = {"where": {"type": "condition", "attribute": "grade", "operator": "greater_than", "threshold": 0.0}}
     inputs = {
@@ -224,8 +238,12 @@ async def test_compute_uses_sdk_dispatch(
         "schema_id": "/objects/regular-3d-grid/1.0.0/regular-3d-grid.schema.json",
     }
     attribute = {"reference": "cell_attributes[?name=='estimate']", "name": "estimate"}
-    target["attribute"] = attribute
-    response = {"message": "Estimation complete", "target": target}
+    if name == "consim":
+        target["summary_attributes"] = {key: attribute for key in ("mean", "variance", "min", "max")}
+        response = {"target": target, "links": {}}
+    else:
+        target["attribute"] = attribute
+        response = {"message": "Estimation complete", "target": target}
     job = SimpleNamespace(wait_for_results=AsyncMock())
 
     async def submit(*, result_type, **kwargs):
@@ -249,21 +267,30 @@ async def test_compute_uses_sdk_dispatch(
     assert payload["neighborhood"]["ellipsoid"]["ellipsoid_ranges"]["major"] == 100
     source_condition = {"where": {**condition["where"], "attribute": "locations.attributes[?key=='grade-key']"}}
     target_condition = {"where": {**condition["where"], "attribute": "cell_attributes[?key=='domain-key']"}}
-    assert payload["source"]["filter"] == Filter.model_validate(source_condition).model_dump()
-    assert payload["target"]["filter"] == Filter.model_validate(target_condition).model_dump()
-    assert payload["target"]["attribute"]["operation"] == "create"
+    if name == "consim":
+        assert payload["source_filter"] == source_condition
+        assert payload["filter"] == target_condition
+    else:
+        assert payload["source"]["filter"] == Filter.model_validate(source_condition).model_dump()
+        assert payload["target"]["filter"] == Filter.model_validate(target_condition).model_dump()
+        assert payload["target"]["attribute"]["operation"] == "create"
     job.wait_for_results.assert_awaited_once()
     assert result.structured_content["scenarios_completed"] == 1
     assert result.structured_content["results"][0]["target"]["reference"] == target["reference"]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", ["kriging", "idw", "knn"])
+@pytest.mark.parametrize("name", ["kriging", "idw", "knn", "consim"])
 @pytest.mark.parametrize("boundary", ["build", "run"])
 async def test_compute_rejects_zero_minimum_samples(
-    compute_server, kriging_build_inputs, neighborhood_build_inputs, name, boundary
+    compute_server, kriging_build_inputs, neighborhood_build_inputs, consim_build_inputs, name, boundary
 ):
-    inputs = {"kriging": kriging_build_inputs, "idw": neighborhood_build_inputs, "knn": neighborhood_build_inputs}[name]
+    inputs = {
+        "kriging": kriging_build_inputs,
+        "idw": neighborhood_build_inputs,
+        "knn": neighborhood_build_inputs,
+        "consim": consim_build_inputs,
+    }[name]
     arguments = {"workspace_id": compute_server.workspace_id}
     if boundary == "build":
         arguments["params"] = {**inputs, "search": {**inputs["search"], "min_samples": 0}}
@@ -323,11 +350,16 @@ async def test_estimation_filters_survive_build_and_run(compute_server, estimati
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", ["kriging", "idw", "knn"])
+@pytest.mark.parametrize("name", ["kriging", "idw", "knn", "consim"])
 async def test_compute_resolves_nested_filter_names(
-    compute_server, kriging_build_inputs, neighborhood_build_inputs, name
+    compute_server, kriging_build_inputs, neighborhood_build_inputs, consim_build_inputs, name
 ):
-    inputs = {"kriging": kriging_build_inputs, "idw": neighborhood_build_inputs, "knn": neighborhood_build_inputs}[name]
+    inputs = {
+        "kriging": kriging_build_inputs,
+        "idw": neighborhood_build_inputs,
+        "knn": neighborhood_build_inputs,
+        "consim": consim_build_inputs,
+    }[name]
     condition = {"type": "condition", "attribute": "grade", "operator": "greater_than", "threshold": 0.0}
     expression = "locations.attributes[?name=='grade']"
     source_filter = {
@@ -347,15 +379,20 @@ async def test_compute_resolves_nested_filter_names(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", ["kriging", "idw", "knn"])
+@pytest.mark.parametrize("name", ["kriging", "idw", "knn", "consim"])
 @pytest.mark.parametrize(
     "field, available",
     [("source_filter", "grade"), ("target_filter", "domain")],
 )
 async def test_compute_rejects_missing_filter_attribute(
-    compute_server, kriging_build_inputs, neighborhood_build_inputs, name, field, available
+    compute_server, kriging_build_inputs, neighborhood_build_inputs, consim_build_inputs, name, field, available
 ):
-    inputs = {"kriging": kriging_build_inputs, "idw": neighborhood_build_inputs, "knn": neighborhood_build_inputs}[name]
+    inputs = {
+        "kriging": kriging_build_inputs,
+        "idw": neighborhood_build_inputs,
+        "knn": neighborhood_build_inputs,
+        "consim": consim_build_inputs,
+    }[name]
     missing_filter = {
         "where": {
             "type": "all_of",
@@ -475,6 +512,354 @@ async def test_compute_feedback_forwards_progress():
     context.report_progress.assert_awaited_once_with(25.0, 100, "Estimating")
 
 
+@pytest.fixture
+def consim_build_inputs(kriging_build_inputs):
+    return {key: value for key, value in kriging_build_inputs.items() if key != "target_attribute"}
+
+
+def consim_result(compute_server, save_simulations=True, optional_outputs=False, target_reference=None):
+    def attribute(name):
+        return {"reference": f"cell_attributes[?name=='{name}']", "name": name}
+
+    payload = {
+        "target": {
+            "reference": target_reference or str(compute_server.target.metadata.url) + "?version=1",
+            "name": "Simulation grid",
+            "schema_id": "/objects/regular-3d-grid/1.0.0/regular-3d-grid.schema.json",
+            "summary_attributes": {name: attribute(name) for name in ("mean", "variance", "min", "max")},
+            "simulations": attribute("realizations") if save_simulations else None,
+        },
+        "links": {"dashboard": "https://example.test/dashboard"},
+    }
+    if optional_outputs:
+        payload["target"].update(
+            quantile_attributes=[{**attribute("P50"), "quantile": 0.5}],
+            probability_above_cutoff_attributes=[{**attribute("probability"), "cutoff": 0.5}],
+            mean_above_cutoff_attributes=[{**attribute("mean_above"), "cutoff": 0.5}],
+        )
+        payload.update(
+            validation_summary={"reference_mean": 1.0, "mean": 1.01},
+            validation_report={"reference": "https://example.test/report.pdf", "name": "Validation report"},
+        )
+    model = ConSimResultModel.model_validate(payload)
+    return ConSimResult(compute_server.context, model)
+
+
+@pytest.mark.asyncio
+async def test_consim_build_payload_round_trip(compute_server, consim_build_inputs):
+    built = await compute_server.server.call_tool(
+        "consim_build_parameters",
+        {"workspace_id": compute_server.workspace_id, "params": consim_build_inputs},
+    )
+    scenario = ConSimParameters.model_validate(built.structured_content)
+    assert scenario.number_of_simulations == 1
+    assert scenario.number_of_simulations_to_save == 1
+    assert scenario.kriging_method == "simple"
+    assert "grade-key" in scenario.source_attribute
+    assert built.structured_content["neighborhood"]["ellipsoid"]["ranges"]["major"] == 100
+    assert compute_server.resolve.await_count == 3
+    compute_server.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_consim_run_formats_sdk_result(compute_server, consim_build_inputs):
+    built = await compute_server.server.call_tool(
+        "consim_build_parameters",
+        {"workspace_id": compute_server.workspace_id, "params": consim_build_inputs},
+    )
+    compute_server.run.return_value = [consim_result(compute_server)]
+    result = await compute_server.server.call_tool(
+        "consim_run",
+        {"workspace_id": compute_server.workspace_id, "scenarios": [built.structured_content]},
+    )
+    content = result.structured_content
+    assert content["scenarios_completed"] == 1
+    output = content["results"][0]
+    assert output["target"]["summary_attributes"]["mean"]["name"] == "mean"
+    assert output["target"]["simulations"]["name"] == "realizations"
+    assert output["target"]["locator"]["object_id"] == consim_build_inputs["target_object_id"]
+    assert output["presentation"]["dashboard_url"] == "https://example.test/dashboard"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"number_of_simulations": 0},
+        {"number_of_simulations": 101},
+        {"number_of_simulations_to_save": -1},
+        {"number_of_simulations_to_save": 2},
+        {"number_of_lines": 0},
+        {"number_of_lines": 1001},
+        {"block_discretization": {"nx": 0}},
+        {"location_wise_quantiles": [-0.1]},
+        {"location_wise_quantiles": [1.1]},
+        {"location_wise_quantiles": [float("nan")]},
+        {"location_wise_quantiles": []},
+        {"probability_above_cutoff": [float("inf")]},
+        {"mean_above_cutoff": []},
+        {"report_mean_thresholds": {"acceptable": 0.05, "marginal": 0.1}},
+        {"target_attribute": "not_supported"},
+        {"distribution": {"weights": "locations.attributes[?name=='weights']"}},
+    ],
+)
+def test_consim_rejects_invalid_configuration(consim_build_inputs, overrides):
+    with pytest.raises(ValidationError):
+        ConSimBuildParams(**consim_build_inputs, **overrides)
+
+
+@pytest.mark.asyncio
+async def test_consim_options_survive_build_and_run(compute_server, consim_build_inputs):
+    inputs = {
+        **consim_build_inputs,
+        "number_of_simulations": 4,
+        "number_of_simulations_to_save": 2,
+        "number_of_lines": 300,
+        "random_seed": 123,
+        "kriging_method": "ordinary",
+        "block_discretization": {"nx": 2, "ny": 2, "nz": 2},
+        "source_filter": {
+            "where": {"type": "condition", "attribute": "grade", "operator": "greater_than", "threshold": 0.0}
+        },
+        "target_filter": {"where": {"type": "condition", "attribute": "domain", "operator": "in", "values": ["ore"]}},
+        "distribution": {
+            "tail_extrapolation": {"upper": {"power": 0.5, "max": 10.0}, "lower": None},
+        },
+        "location_wise_quantiles": [0.1, 0.5, 0.9],
+        "probability_above_cutoff": [0.5],
+        "mean_above_cutoff": [0.5],
+        "perform_validation": True,
+        "report_context": {"title": "Simulation", "details": [{"label": "Data", "value": "Synthetic samples"}]},
+        "report_mean_thresholds": {"acceptable": 0.05, "marginal": 0.1},
+    }
+    built = await compute_server.server.call_tool(
+        "consim_build_parameters", {"workspace_id": compute_server.workspace_id, "params": inputs}
+    )
+    payload = built.structured_content
+    assert payload["filter"]["where"]["values"] == ["ore"]
+    assert payload["source_filter"]["where"]["attribute"] == "locations.attributes[?key=='grade-key']"
+    assert payload["filter"]["where"]["attribute"] == "cell_attributes[?key=='domain-key']"
+    assert payload["distribution"]["tail_extrapolation"]["lower"] is None
+    compute_server.run.return_value = [consim_result(compute_server, optional_outputs=True)]
+    result = await compute_server.server.call_tool(
+        "consim_run", {"workspace_id": compute_server.workspace_id, "scenarios": [payload]}
+    )
+    context, scenarios = compute_server.run.call_args.args
+    assert context is compute_server.context
+    scenario = scenarios[0]
+    assert isinstance(scenario, ConSimParameters)
+    assert scenario.number_of_simulations == 4
+    assert scenario.number_of_simulations_to_save == 2
+    assert scenario.random_seed == 123
+    assert scenario.number_of_lines == 300
+    assert scenario.kriging_method == "ordinary"
+    assert scenario.source_filter.where.attribute == "locations.attributes[?key=='grade-key']"
+    assert scenario.filter.where.values == ["ore"]
+    assert scenario.block_discretization.nx == 2
+    assert scenario.location_wise_quantiles == [0.1, 0.5, 0.9]
+    assert scenario.distribution.tail_extrapolation.upper.power == 0.5
+    assert scenario.perform_validation is True
+    assert scenario.report_context.title == "Simulation"
+    assert scenario.report_mean_thresholds.acceptable == 0.05
+    backend_payload = scenario.model_dump(mode="json", by_alias=True, exclude_none=True)
+    assert backend_payload["distribution"]["tail_extrapolation"].get("lower") is None
+    assert compute_server.run.call_args.kwargs["preview"] is True
+    assert isinstance(compute_server.run.call_args.kwargs["fb"], MCPFeedback)
+    output = result.structured_content["results"][0]
+    assert output["target"]["quantile_attributes"][0]["quantile"] == 0.5
+    assert output["target"]["probability_above_cutoff_attributes"][0]["cutoff"] == 0.5
+    assert output["target"]["mean_above_cutoff_attributes"][0]["name"] == "mean_above"
+    assert output["validation_summary"]["reference_mean"] == 1.0
+    assert output["validation_report"]["reference"] == "https://example.test/report.pdf"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["consim_build_parameters", "consim_run"])
+async def test_consim_validation_requires_saved_realizations(compute_server, consim_build_inputs, tool):
+    settings = {"perform_validation": True, "number_of_simulations_to_save": 0}
+    arguments = {"workspace_id": compute_server.workspace_id}
+    if tool == "consim_build_parameters":
+        arguments["params"] = {**consim_build_inputs, **settings}
+    else:
+        built = await compute_server.server.call_tool(
+            "consim_build_parameters",
+            {"workspace_id": compute_server.workspace_id, "params": consim_build_inputs},
+        )
+        arguments["scenarios"] = [{**built.structured_content, **settings}]
+    with pytest.raises(InvalidArguments, match="perform_validation requires number_of_simulations_to_save"):
+        await compute_server.server.call_tool(tool, arguments)
+    compute_server.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_consim_can_save_statistics_only(compute_server, consim_build_inputs):
+    built = await compute_server.server.call_tool(
+        "consim_build_parameters",
+        {
+            "workspace_id": compute_server.workspace_id,
+            "params": {**consim_build_inputs, "number_of_simulations_to_save": 0},
+        },
+    )
+    compute_server.run.return_value = [consim_result(compute_server, save_simulations=False)]
+    result = await compute_server.server.call_tool(
+        "consim_run", {"workspace_id": compute_server.workspace_id, "scenarios": [built.structured_content]}
+    )
+    assert compute_server.run.call_args.args[1][0].number_of_simulations_to_save == 0
+    output = result.structured_content["results"][0]
+    assert output["target"]["simulations"] is None
+    assert output["target"]["quantile_attributes"] == []
+    assert output["validation_summary"] is None
+    assert output["validation_report"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["point_set_object_id", "target_object_id", "variogram_object_id"])
+async def test_consim_rejects_incorrect_object_roles(compute_server, consim_build_inputs, field):
+    wrong_type = Regular3DGrid if field == "point_set_object_id" else PointSet
+    compute_server.objects[consim_build_inputs[field]] = MagicMock(spec=wrong_type)
+    with pytest.raises(ToolError, match="object must be"):
+        await compute_server.server.call_tool(
+            "consim_build_parameters", {"workspace_id": compute_server.workspace_id, "params": consim_build_inputs}
+        )
+    compute_server.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_consim_accepts_masked_grid(compute_server, consim_build_inputs):
+    masked_grid = MagicMock(spec=RegularMasked3DGrid)
+    masked_grid.metadata.url = compute_server.target.metadata.url
+    compute_server.objects[consim_build_inputs["target_object_id"]] = masked_grid
+    built = await compute_server.server.call_tool(
+        "consim_build_parameters", {"workspace_id": compute_server.workspace_id, "params": consim_build_inputs}
+    )
+    assert ConSimParameters.model_validate(built.structured_content).target_object == str(masked_grid.metadata.url)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "limit",
+    [
+        "max_empty_octants",
+        "max_samples_per_octant",
+        "max_empty_quadrants",
+        "max_samples_per_quadrant",
+        "max_samples_per_drillhole",
+        "max_drillholes_per_estimate",
+    ],
+)
+async def test_consim_rejects_unsupported_search_limits(compute_server, consim_build_inputs, limit):
+    inputs = {**consim_build_inputs, "search": {**consim_build_inputs["search"], limit: 1}}
+    with pytest.raises(ValidationError, match="This task does not support"):
+        await compute_server.server.call_tool(
+            "consim_build_parameters", {"workspace_id": compute_server.workspace_id, "params": inputs}
+        )
+    compute_server.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_consim_rejects_empty_scenarios(compute_server):
+    with pytest.raises(ToolError, match="at least one scenario"):
+        await compute_server.server.call_tool(
+            "consim_run", {"workspace_id": compute_server.workspace_id, "scenarios": []}
+        )
+    compute_server.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_consim_run_rechecks_save_count(compute_server, consim_build_inputs):
+    built = await compute_server.server.call_tool(
+        "consim_build_parameters", {"workspace_id": compute_server.workspace_id, "params": consim_build_inputs}
+    )
+    payload = {**built.structured_content, "number_of_simulations_to_save": 2}
+    with pytest.raises(InvalidArguments, match="cannot exceed"):
+        await compute_server.server.call_tool(
+            "consim_run", {"workspace_id": compute_server.workspace_id, "scenarios": [payload]}
+        )
+    compute_server.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_consim_rejects_parallel_writes_to_same_grid(compute_server, consim_build_inputs):
+    built = await compute_server.server.call_tool(
+        "consim_build_parameters", {"workspace_id": compute_server.workspace_id, "params": consim_build_inputs}
+    )
+    first = built.structured_content
+    second = {**first, "target_object": first["target_object"] + "?version=2", "random_seed": 456}
+    with pytest.raises(ToolError, match="distinct target objects"):
+        await compute_server.server.call_tool(
+            "consim_run", {"workspace_id": compute_server.workspace_id, "scenarios": [first, second]}
+        )
+    compute_server.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_consim_preserves_multi_grid_scenario_order(compute_server, consim_build_inputs):
+    built = await compute_server.server.call_tool(
+        "consim_build_parameters", {"workspace_id": compute_server.workspace_id, "params": consim_build_inputs}
+    )
+    first = built.structured_content
+    second_id = "00000000-0000-0000-0000-000000000006"
+    second_reference = (
+        "https://example.test/geoscience-object/orgs/00000000-0000-0000-0000-000000000005/"
+        f"workspaces/{compute_server.workspace_id}/objects/{second_id}"
+    )
+    second = {**first, "target_object": second_reference, "random_seed": 456}
+    compute_server.run.return_value = [
+        consim_result(compute_server),
+        consim_result(compute_server, target_reference=second_reference),
+    ]
+    result = await compute_server.server.call_tool(
+        "consim_run", {"workspace_id": compute_server.workspace_id, "scenarios": [first, second]}
+    )
+    assert result.structured_content["scenarios_completed"] == 2
+    assert [item["target"]["locator"]["object_id"] for item in result.structured_content["results"]] == [
+        consim_build_inputs["target_object_id"],
+        second_id,
+    ]
+    assert compute_server.run.call_args.args[1][1].random_seed == 456
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["", "   "])
+async def test_consim_rejects_empty_source_attribute(compute_server, consim_build_inputs, value):
+    with pytest.raises(ToolError, match="point_set_attribute must be a non-empty string"):
+        await compute_server.server.call_tool(
+            "consim_build_parameters",
+            {
+                "workspace_id": compute_server.workspace_id,
+                "params": {**consim_build_inputs, "point_set_attribute": value},
+            },
+        )
+    compute_server.resolve.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_consim_rejects_missing_source_attribute(compute_server, consim_build_inputs):
+    missing = MagicMock(spec=PendingAttribute)
+    missing.exists = False
+    compute_server.source.attributes["missing"] = missing
+    with pytest.raises(ToolError, match="does not exist on the source point set"):
+        await compute_server.server.call_tool(
+            "consim_build_parameters",
+            {
+                "workspace_id": compute_server.workspace_id,
+                "params": {**consim_build_inputs, "point_set_attribute": "missing"},
+            },
+        )
+    compute_server.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_consim_reports_compute_errors(compute_server, consim_build_inputs):
+    built = await compute_server.server.call_tool(
+        "consim_build_parameters", {"workspace_id": compute_server.workspace_id, "params": consim_build_inputs}
+    )
+    compute_server.run.side_effect = RuntimeError("Simulation failed")
+    with pytest.raises(ToolError, match="Simulation failed"):
+        await compute_server.server.call_tool(
+            "consim_run", {"workspace_id": compute_server.workspace_id, "scenarios": [built.structured_content]}
+        )
+
+
 ROTATION = {"dip_azimuth": 45.0, "dip": 30.0, "pitch": 10.0}
 OTHER_WORKSPACE = "00000000-0000-0000-0000-0000000000ff"
 
@@ -512,16 +897,35 @@ async def test_estimation_search_rotation_survives_build_and_run(compute_server,
 
 @pytest.mark.parametrize(
     "model, fixture_name",
-    [(KrigingBuildParams, "kriging"), (IDWBuildParams, "neighborhood"), (KNNBuildParams, "neighborhood")],
+    [
+        (KrigingBuildParams, "kriging"),
+        (IDWBuildParams, "neighborhood"),
+        (KNNBuildParams, "neighborhood"),
+        (ConSimBuildParams, "consim"),
+    ],
 )
 def test_build_models_preserve_rotation_and_reject_typos_directly(
-    kriging_build_inputs, neighborhood_build_inputs, model, fixture_name
+    kriging_build_inputs, neighborhood_build_inputs, consim_build_inputs, model, fixture_name
 ):
-    inputs = kriging_build_inputs if fixture_name == "kriging" else neighborhood_build_inputs
+    inputs = {
+        "kriging": kriging_build_inputs,
+        "neighborhood": neighborhood_build_inputs,
+        "consim": consim_build_inputs,
+    }[fixture_name]
     params = model(**with_rotation(inputs))
     assert params.search.ellipsoid.to_dict()["rotation"] == ROTATION
     with pytest.raises(ValidationError):
         model(**{**inputs, "search": {**inputs["search"], "min_sample": 3}})
+
+
+@pytest.mark.asyncio
+async def test_consim_search_rotation_survives_build_and_run(compute_server, consim_build_inputs):
+    payload = await build(compute_server, "consim", with_rotation(consim_build_inputs))
+    compute_server.run.return_value = [consim_result(compute_server)]
+    await run(compute_server, "consim", [payload])
+    scenario = compute_server.run.call_args.args[1][0]
+    backend = scenario.model_dump(mode="json", by_alias=True, exclude_none=True)
+    assert backend["neighborhood"]["ellipsoid"]["rotation"] == ROTATION
 
 
 @pytest.mark.asyncio
@@ -563,6 +967,34 @@ async def test_estimation_run_rejects_unknown_fields(compute_server, estimation_
     container[key] = 1
     with pytest.raises(InvalidArguments):
         await run(compute_server, estimation_case.name, [payload])
+    compute_server.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["number_of_simulation", "target_filter", "unexpected"])
+async def test_consim_run_rejects_unknown_fields(compute_server, consim_build_inputs, key):
+    payload = await build(compute_server, "consim", consim_build_inputs)
+    with pytest.raises(InvalidArguments):
+        await run(compute_server, "consim", [{**payload, key: 1}])
+    compute_server.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"location_wise_quantiles": [1.5]},
+        {"location_wise_quantiles": [float("nan")]},
+        {"probability_above_cutoff": []},
+        {"mean_above_cutoff": [float("inf")]},
+        {"report_mean_thresholds": {"acceptable": 0.05, "marginal": 0.1}},
+        {"neighborhood": {"ellipsoid": {"ranges": {"major": 1, "semi_major": 1, "minor": 1}}, "max_samples": 0}},
+    ],
+)
+async def test_consim_run_rechecks_build_constraints(compute_server, consim_build_inputs, override):
+    payload = await build(compute_server, "consim", consim_build_inputs)
+    with pytest.raises(InvalidArguments):
+        await run(compute_server, "consim", [{**payload, **override}])
     compute_server.run.assert_not_awaited()
 
 
@@ -625,6 +1057,16 @@ async def test_kriging_run_rejects_variogram_outside_workspace(compute_server, k
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["source_object", "target_object", "variogram_model"])
+async def test_consim_run_rejects_objects_outside_workspace(compute_server, consim_build_inputs, field):
+    payload = await build(compute_server, "consim", consim_build_inputs)
+    payload[field] = move_reference(payload[field], workspace=OTHER_WORKSPACE)
+    with pytest.raises(ToolError, match="outside workspace"):
+        await run(compute_server, "consim", [payload])
+    compute_server.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_estimation_rejects_parallel_writes_to_same_attribute(compute_server, estimation_case):
     payload = await build(compute_server, estimation_case.name, estimation_case.inputs)
     second = deepcopy(payload)
@@ -641,3 +1083,31 @@ def add_source_attribute(compute_server, name, exists=True):
     attribute.exists = exists
     attribute._context = SimpleNamespace(schema_path="locations.attributes")
     compute_server.source.attributes[name] = attribute
+
+
+@pytest.mark.asyncio
+async def test_consim_resolves_weights_attribute(compute_server, consim_build_inputs):
+    add_source_attribute(compute_server, "declust_wt")
+    payload = await build(
+        compute_server, "consim", {**consim_build_inputs, "distribution": {"weights_attribute": "declust_wt"}}
+    )
+    assert payload["distribution"]["weights"] == "locations.attributes[?key=='declust_wt-key']"
+    assert payload["distribution"]["tail_extrapolation"] is None
+    compute_server.run.return_value = [consim_result(compute_server)]
+    await run(compute_server, "consim", [payload])
+    scenario = compute_server.run.call_args.args[1][0]
+    assert scenario.distribution.weights == "locations.attributes[?key=='declust_wt-key']"
+
+
+@pytest.mark.asyncio
+async def test_consim_rejects_missing_weights_attribute(compute_server, consim_build_inputs):
+    add_source_attribute(compute_server, "missing", exists=False)
+    with pytest.raises(ToolError, match="distribution.weights_attribute 'missing' does not exist"):
+        await build(compute_server, "consim", {**consim_build_inputs, "distribution": {"weights_attribute": "missing"}})
+    compute_server.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_consim_omits_empty_distribution(compute_server, consim_build_inputs):
+    payload = await build(compute_server, "consim", {**consim_build_inputs, "distribution": {}})
+    assert payload["distribution"] is None

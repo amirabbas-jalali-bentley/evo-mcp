@@ -5,9 +5,15 @@
 """Input parameters and validation for compute tools."""
 
 import math
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from evo.compute.tasks.common import Filter, SearchNeighborhood
+from evo.compute.tasks.geostatistics.conditioned_simulator import (
+    ConSimParameters,
+    ReportContext,
+    ReportMeanThresholds,
+    TailExtrapolationParams,
+)
 from evo.compute.tasks.geostatistics.idw import IDWParameters
 from evo.compute.tasks.geostatistics.knn import KNNParameters
 from evo.compute.tasks.geostatistics.kriging import (
@@ -16,7 +22,15 @@ from evo.compute.tasks.geostatistics.kriging import (
     OrdinaryKriging,
     SimpleKriging,
 )
-from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    FiniteFloat,
+    model_validator,
+)
 
 from evo_mcp.utils.tool_support import VariogramObjectId
 
@@ -144,6 +158,88 @@ class KNNBuildParams(NeighborhoodBuildParams):
     """Inputs for the arithmetic mean of accepted nearest neighbors."""
 
 
+class ConSimDistributionInput(BaseModel):
+    """Normal-score distribution options, referring to source attributes by name."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    weights_attribute: str | None = Field(
+        default=None,
+        description="Existing numeric source point-set attribute holding declustering weights, e.g. 'declust_wt'.",
+    )
+    tail_extrapolation: TailExtrapolationParams | None = Field(
+        default=None, description="Optional upper and lower tail extrapolation for the back-transform."
+    )
+
+
+class ConSimBuildParams(BaseModel):
+    """Inputs for Evo's complete conditional turning-bands simulation workflow."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    point_set_object_id: str = Field(description="UUID of the published conditioning PointSet.")
+    point_set_attribute: str = Field(description="Existing numeric attribute containing conditioning sample values.")
+    target_object_id: str = Field(description="UUID of an existing Regular3DGrid or RegularMasked3DGrid.")
+    variogram_object_id: VariogramObjectId
+    search: SearchInput = Field(description="Conditioning neighborhood; sector and drillhole limits are unsupported.")
+    source_filter: FilterInput | None = Field(default=None, description="Optional filter on conditioning samples.")
+    target_filter: FilterInput | None = Field(default=None, description="Optional filter on target grid locations.")
+    block_discretization: BlockDiscretization = Field(
+        default_factory=BlockDiscretization, description="Sub-cell discretization for block support correction."
+    )
+    distribution: ConSimDistributionInput | None = Field(
+        default=None, description="Optional declustering weights and tail extrapolation for the normal-score transform."
+    )
+    kriging_method: Literal["simple", "ordinary"] = Field(
+        default="simple", description="Conditioning method in the simulation workflow; defaults to simple kriging."
+    )
+    number_of_lines: int = Field(default=500, ge=1, le=1000, description="Number of turning-band lines.")
+    number_of_simulations: int = Field(default=1, ge=1, le=100, description="Number of realizations to generate.")
+    number_of_simulations_to_save: int = Field(
+        default=1,
+        ge=0,
+        le=100,
+        description="Realizations to publish; cannot exceed the generated count. Zero saves statistics without validation.",
+    )
+    random_seed: int = Field(default=38239342, description="Seed for reproducible simulation and tie-breaking.")
+    location_wise_quantiles: list[Annotated[FiniteFloat, Field(ge=0, le=1)]] | None = Field(
+        default=None, min_length=1, description="Optional quantiles between 0 and 1, for example [0.1, 0.5, 0.9]."
+    )
+    probability_above_cutoff: list[FiniteFloat] | None = Field(
+        default=None, min_length=1, description="Optional cutoffs for per-location probability-above-cutoff attributes."
+    )
+    mean_above_cutoff: list[FiniteFloat] | None = Field(
+        default=None, min_length=1, description="Optional cutoffs for per-location mean-above-cutoff attributes."
+    )
+    perform_validation: bool = Field(
+        default=False, description="Generate the optional simulation validation report; requires a saved realization."
+    )
+    report_context: ReportContext | None = None
+    report_mean_thresholds: ReportMeanThresholds | None = None
+
+    @model_validator(mode="after")
+    def validate_configuration(self) -> "ConSimBuildParams":
+        _check_consim_settings(self)
+        return self
+
+
+def _check_consim_settings(settings: ConSimBuildParams | ConSimParameters) -> None:
+    if settings.number_of_simulations_to_save > settings.number_of_simulations:
+        raise ValueError("number_of_simulations_to_save cannot exceed number_of_simulations.")
+    if settings.perform_validation and settings.number_of_simulations_to_save < 1:
+        raise ValueError("perform_validation requires number_of_simulations_to_save to be at least 1.")
+    for field in ("location_wise_quantiles", "probability_above_cutoff", "mean_above_cutoff"):
+        values = getattr(settings, field)
+        if values is not None and not (values and all(math.isfinite(value) for value in values)):
+            raise ValueError(f"{field} must be a non-empty list of finite numbers when provided.")
+    if not all(0 <= quantile <= 1 for quantile in settings.location_wise_quantiles or ()):
+        raise ValueError("location_wise_quantiles must be between 0 and 1.")
+    if not settings.perform_validation and (
+        settings.report_context is not None or settings.report_mean_thresholds is not None
+    ):
+        raise ValueError("Report settings require perform_validation=true.")
+
+
 def _check_kriging_scenario(scenario: KrigingParameters) -> KrigingParameters:
     _check_sample_limits(scenario.search)
     return scenario
@@ -161,11 +257,21 @@ def _check_knn_scenario(scenario: KNNParameters) -> KNNParameters:
     return scenario
 
 
+def _check_consim_scenario(scenario: ConSimParameters) -> ConSimParameters:
+    _check_sample_limits(scenario.neighborhood)
+    _check_consim_settings(scenario)
+    return scenario
+
+
 KrigingBuildInput = Annotated[KrigingBuildParams, _strict_validator(KrigingBuildParams)]
 IDWBuildInput = Annotated[IDWBuildParams, _strict_validator(IDWBuildParams)]
 KNNBuildInput = Annotated[KNNBuildParams, _strict_validator(KNNBuildParams)]
+ConSimBuildInput = Annotated[ConSimBuildParams, _strict_validator(ConSimBuildParams)]
 KrigingScenario = Annotated[
     KrigingParameters, _strict_validator(KrigingParameters), AfterValidator(_check_kriging_scenario)
 ]
 IDWScenario = Annotated[IDWParameters, _strict_validator(IDWParameters), AfterValidator(_check_idw_scenario)]
 KNNScenario = Annotated[KNNParameters, _strict_validator(KNNParameters), AfterValidator(_check_knn_scenario)]
+ConSimScenario = Annotated[
+    ConSimParameters, _strict_validator(ConSimParameters), AfterValidator(_check_consim_scenario)
+]

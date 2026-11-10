@@ -46,6 +46,8 @@ BM25_QUERY_EXPECTATIONS = [
     ("build IDW parameters", "idw_build_parameters"),
     ("run k nearest neighbor estimation", "knn_run"),
     ("build KNN parameters", "knn_build_parameters"),
+    ("run conditional simulation", "consim_run"),
+    ("build ConSim parameters", "consim_build_parameters"),
     ("list objects in a workspace", "list_objects"),
     ("add users to an instance", "add_users_to_instance"),
     ("find duplicate objects", "find_duplicate_objects"),
@@ -59,6 +61,7 @@ REGEX_PATTERN_EXPECTATIONS = [
     ("kriging", "kriging_run"),
     ("idw_run", "idw_run"),
     ("knn_run", "knn_run"),
+    ("consim_run", "consim_run"),
     ("download", "download_file"),
     ("create_workspace", "create_workspace"),
 ]
