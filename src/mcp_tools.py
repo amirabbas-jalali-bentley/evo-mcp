@@ -475,7 +475,7 @@ if TOOL_FILTER in ["all", "compute"]:
         - Setting the active workspace for compute workflows
         - Discovering source and target objects for compute tasks
         - Building variograms and search neighborhoods
-        - Running kriging, IDW, and KNN workflows and scenario comparisons
+        - Running kriging, IDW, KNN, and conditional simulation workflows and scenario comparisons
         - Retrieving and summarizing output attributes
 
         Always confirm workspace context before running compute operations.

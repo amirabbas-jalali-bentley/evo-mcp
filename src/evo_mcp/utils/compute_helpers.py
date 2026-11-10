@@ -21,18 +21,39 @@ from evo.compute.tasks.common import (
     SearchNeighborhood,
     Source,
 )
+from evo.compute.tasks.geostatistics.conditioned_simulator import ConSimParameters, ConSimResult, DistributionParams
 from evo.compute.tasks.geostatistics.idw import IDWParameters
 from evo.compute.tasks.geostatistics.knn import KNNParameters
 from evo.compute.tasks.geostatistics.kriging import KrigingDiagnostics, KrigingParameters
 from evo.objects import ObjectReference
-from evo.objects.typed import DownholeIntervals, object_from_reference, object_from_uuid
+from evo.objects.typed import (
+    DownholeIntervals,
+    PointSet,
+    Regular3DGrid,
+    RegularMasked3DGrid,
+    Variogram,
+    object_from_reference,
+    object_from_uuid,
+)
 from evo.widgets import format_task_result_with_target
 from fastmcp import Context
 from jmespath.exceptions import JMESPathError
 
 from evo_mcp.context import get_evo_context
-from evo_mcp.utils.compute_params import IDWBuildParams, KNNBuildParams, KrigingBuildParams, NeighborhoodBuildParams
-from evo_mcp.utils.tool_support import MCPFeedback, build_links_from_metadata, get_workspace_environment
+from evo_mcp.utils.compute_params import (
+    ConSimBuildParams,
+    ConSimDistributionInput,
+    IDWBuildParams,
+    KNNBuildParams,
+    KrigingBuildParams,
+    NeighborhoodBuildParams,
+)
+from evo_mcp.utils.tool_support import (
+    MCPFeedback,
+    build_links_from_metadata,
+    get_workspace_environment,
+    require_object_role,
+)
 
 
 def _active_drillhole_limits(neighborhood: SearchNeighborhood) -> list[str]:
@@ -240,6 +261,58 @@ async def build_knn_parameters(workspace_id: str, params: KNNBuildParams) -> dic
     return _normalize_neighborhood_payload(payload.model_dump(mode="json", exclude_none=True))
 
 
+async def build_consim_parameters(workspace_id: str, params: ConSimBuildParams) -> dict[str, Any]:
+    """Resolve published objects and construct a round-trippable ConSim payload."""
+    if not params.point_set_attribute.strip():
+        raise ValueError("point_set_attribute must be a non-empty string.")
+    distribution_input = params.distribution or ConSimDistributionInput()
+    weights_attribute = distribution_input.weights_attribute
+    tail_extrapolation = distribution_input.tail_extrapolation
+    if weights_attribute is not None and not weights_attribute.strip():
+        raise ValueError("distribution.weights_attribute must be a non-empty string when provided.")
+    environment = await get_workspace_environment(workspace_id)
+    evo_context = await get_evo_context()
+    context = StaticContext.from_environment(environment, evo_context.connector)
+    source_object, target_object, variogram_object = await asyncio.gather(
+        object_from_uuid(context, params.point_set_object_id),
+        object_from_uuid(context, params.target_object_id),
+        object_from_uuid(context, params.variogram_object_id),
+    )
+    require_object_role(source_object, PointSet, "Source", "a PointSet")
+    require_object_role(target_object, (Regular3DGrid, RegularMasked3DGrid), "Target", "a regular or masked 3D grid")
+    require_object_role(variogram_object, Variogram, "Variogram", "a Variogram")
+    source_attribute = _existing_source_attribute(source_object, params.point_set_attribute)
+    weights = None
+    if weights_attribute is not None:
+        weights = _existing_source_attribute(source_object, weights_attribute, "distribution.weights_attribute")
+    distribution = None
+    if weights is not None or tail_extrapolation is not None:
+        distribution = DistributionParams(weights=weights, tail_extrapolation=tail_extrapolation)
+    payload = ConSimParameters(
+        source_object=source_object,
+        source_attribute=source_attribute,
+        target_object=target_object,
+        variogram_model=variogram_object,
+        neighborhood=params.neighborhood,
+        source_filter=_resolve_filter_attributes(params.source_filter, source_object, "source_filter"),
+        filter=_resolve_filter_attributes(params.target_filter, target_object, "target_filter"),
+        block_discretization=params.block_discretization,
+        distribution=distribution,
+        kriging_method=params.kriging_method,
+        number_of_lines=params.number_of_lines,
+        number_of_simulations=params.number_of_simulations,
+        number_of_simulations_to_save=params.number_of_simulations_to_save,
+        random_seed=params.random_seed,
+        location_wise_quantiles=params.location_wise_quantiles,
+        probability_above_cutoff=params.probability_above_cutoff,
+        mean_above_cutoff=params.mean_above_cutoff,
+        perform_validation=params.perform_validation,
+        report_context=params.report_context,
+        report_mean_thresholds=params.report_mean_thresholds,
+    )
+    return _normalize_neighborhood_payload(payload.model_dump(mode="json"))
+
+
 def _object_identity(reference: str) -> tuple[UUID, UUID | str | None]:
     parsed = ObjectReference(reference)
     return parsed.workspace_id, parsed.object_id or parsed.object_path
@@ -401,6 +474,8 @@ async def _estimation_outputs(context: Any, scenarios: list[Any]) -> list[tuple[
 
 
 def _object_references(scenario: Any) -> list[str]:
+    if isinstance(scenario, ConSimParameters):
+        return [scenario.source_object, scenario.target_object, scenario.variogram_model]
     references = [scenario.source.object, scenario.target.object]
     if isinstance(scenario, KrigingParameters):
         references.append(scenario.variogram)
@@ -492,3 +567,53 @@ async def run_estimation_scenarios(workspace_id: str, scenarios: list[Any], ctx:
         output_kind="target attributes",
         format_result=_format_single_result,
     )
+
+
+async def _consim_outputs(_context: Any, scenarios: list[ConSimParameters]) -> list[tuple[Any, ...]]:
+    return [_object_identity(scenario.target_object) for scenario in scenarios]
+
+
+async def run_consim_scenarios(workspace_id: str, scenarios: list[ConSimParameters], ctx: Context) -> dict[str, Any]:
+    """Run validated simulation scenarios and return results in input order."""
+    return await _run_scenarios(
+        workspace_id,
+        scenarios,
+        ctx,
+        collect_outputs=_consim_outputs,
+        output_kind="target objects",
+        format_result=lambda result, _scenario, environment: _format_consim_result(result, environment),
+    )
+
+
+def _format_consim_result(result: ConSimResult, environment: Any) -> dict[str, Any]:
+    target_object_id = urlsplit(result.target_reference).path.rstrip("/").rsplit("/", 1)[-1]
+    links = build_links_from_metadata(environment, target_object_id)
+    simulations = result.simulations_attribute
+    validation = result.validation_summary
+    validation_report = getattr(result, "_validation_report", None)
+    return {
+        "status": "success",
+        "target": {
+            "name": result.target_name,
+            "reference": result.target_reference,
+            "schema_id": str(result.schema),
+            "locator": {
+                "org_id": str(environment.org_id),
+                "workspace_id": str(environment.workspace_id),
+                "object_id": target_object_id,
+                "hub_url": environment.hub_url,
+            },
+            "summary_attributes": result.summary_attributes.model_dump(mode="json"),
+            "simulations": simulations.model_dump(mode="json") if simulations is not None else None,
+            "quantile_attributes": [attribute.model_dump(mode="json") for attribute in result.quantile_attributes],
+            "probability_above_cutoff_attributes": [
+                attribute.model_dump(mode="json") for attribute in result.probability_above_cutoff_attributes
+            ],
+            "mean_above_cutoff_attributes": [
+                attribute.model_dump(mode="json") for attribute in result.mean_above_cutoff_attributes
+            ],
+        },
+        "validation_summary": validation.model_dump(mode="json") if validation is not None else None,
+        "validation_report": validation_report.model_dump(mode="json") if validation_report is not None else None,
+        "presentation": {**links, "dashboard_url": result.dashboard_url},
+    }
