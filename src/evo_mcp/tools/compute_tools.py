@@ -8,15 +8,25 @@ from typing import Any
 
 from fastmcp import Context
 
-from evo_mcp.utils.compute_helpers import build_idw_parameters, build_kriging_parameters, run_estimation_scenarios
+from evo_mcp.utils.compute_helpers import (
+    build_idw_parameters,
+    build_knn_parameters,
+    build_kriging_parameters,
+    run_estimation_scenarios,
+)
 from evo_mcp.utils.compute_params import (
     IDWBuildInput,
     IDWScenario,
+    KNNBuildInput,
+    KNNScenario,
     KrigingBuildInput,
     KrigingScenario,
 )
 from evo_mcp.utils.compute_params import (
     IDWBuildParams as IDWBuildParams,
+)
+from evo_mcp.utils.compute_params import (
+    KNNBuildParams as KNNBuildParams,
 )
 from evo_mcp.utils.compute_params import (
     KrigingBuildParams as KrigingBuildParams,
@@ -56,12 +66,33 @@ def register_compute_tools(mcp) -> None:
         return await build_idw_parameters(workspace_id, params)
 
     @mcp.tool()
+    async def knn_build_parameters(workspace_id: str, params: KNNBuildInput) -> dict[str, Any]:
+        """Build validated k-nearest neighbor (KNN) parameters for knn_run.
+
+        KNN estimates the arithmetic mean of accepted neighbors within the
+        search ellipsoid. search.max_samples sets the maximum neighbor count;
+        fewer may be used depending on sample availability and search limits.
+        No variogram or weighting power is required. Does not run estimation.
+        """
+        return await build_knn_parameters(workspace_id, params)
+
+    @mcp.tool()
     async def idw_run(workspace_id: str, scenarios: list[IDWScenario], ctx: Context) -> dict[str, Any]:
         """Run inverse distance weighting (IDW) estimation scenarios in parallel.
 
         Accept payloads from idw_build_parameters. Estimates create or update
         attributes on the published target objects. Returns output references
         and viewer links in input order, with progress reported while running.
+        """
+        return await run_estimation_scenarios(workspace_id, scenarios, ctx)
+
+    @mcp.tool()
+    async def knn_run(workspace_id: str, scenarios: list[KNNScenario], ctx: Context) -> dict[str, Any]:
+        """Run k-nearest neighbor (KNN) estimation scenarios in parallel.
+
+        Accept payloads from knn_build_parameters and average accepted nearby
+        samples with equal weights. Writes target attributes and returns output
+        references and viewer links in input order, reporting progress.
         """
         return await run_estimation_scenarios(workspace_id, scenarios, ctx)
 

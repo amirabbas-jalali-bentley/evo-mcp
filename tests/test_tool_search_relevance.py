@@ -44,6 +44,8 @@ BM25_QUERY_EXPECTATIONS = [
     ("run kriging interpolation", "kriging_run"),
     ("run inverse distance weighting estimation", "idw_run"),
     ("build IDW parameters", "idw_build_parameters"),
+    ("run k nearest neighbor estimation", "knn_run"),
+    ("build KNN parameters", "knn_build_parameters"),
     ("list objects in a workspace", "list_objects"),
     ("add users to an instance", "add_users_to_instance"),
     ("find duplicate objects", "find_duplicate_objects"),
@@ -56,6 +58,7 @@ BM25_QUERY_EXPECTATIONS = [
 REGEX_PATTERN_EXPECTATIONS = [
     ("kriging", "kriging_run"),
     ("idw_run", "idw_run"),
+    ("knn_run", "knn_run"),
     ("download", "download_file"),
     ("create_workspace", "create_workspace"),
 ]

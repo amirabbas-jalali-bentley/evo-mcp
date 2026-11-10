@@ -19,7 +19,7 @@ All compute tools use the same build → inspect → run flow:
 - Every referenced object must belong to the `workspace_id` passed to the run
   tool, on the same hub and instance.
 - Scenarios in one run call must write to distinct outputs: distinct target
-  attributes for kriging and IDW.
+  attributes for kriging, IDW, and KNN.
 
 ## Inverse distance weighting (IDW)
 
@@ -39,6 +39,21 @@ The runner submits scenarios concurrently, reports progress, and returns target
 attribute references plus portal/viewer links in input order. Estimates create
 or update attributes on published target objects; this is not a dry run. Use
 distinct output attribute names when comparing scenarios.
+
+## K-nearest neighbors (KNN)
+
+Use `knn_build_parameters(workspace_id, params)` followed by
+`knn_run(workspace_id, scenarios)`. Inputs are the same source, target, `search`,
+and optional filters as IDW, without `power` or a variogram.
+
+Evo KNN computes the arithmetic mean of accepted neighbors, with equal weights.
+Set `search.max_samples` to the maximum neighbor count; this is not a separate
+`k` parameter. Search constraints and sample availability can reduce that count.
+For both IDW and KNN, `max_samples` must be positive and `min_samples`, when set,
+must be between one and `max_samples`.
+
+The runner reports progress and returns created/updated attribute references
+and links in scenario order. Use distinct output attributes for comparisons.
 
 ## Kriging
 
