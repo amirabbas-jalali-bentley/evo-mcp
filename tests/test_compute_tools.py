@@ -13,6 +13,7 @@ from evo.compute.client import JobClient
 from evo.compute.tasks import run as run_sdk_compute
 from evo.compute.tasks.common import Filter
 from evo.compute.tasks.geostatistics.idw import IDWParameters
+from evo.compute.tasks.geostatistics.knn import KNNParameters
 from evo.compute.tasks.geostatistics.kriging import KrigingParameters
 from evo.objects.typed import Attribute, PendingAttribute, PointSet, Regular3DGrid, Variogram
 from fastmcp import FastMCP
@@ -22,12 +23,13 @@ from pydantic import ValidationError
 
 from evo_mcp.tools import compute_tools
 from evo_mcp.utils import compute_helpers
-from evo_mcp.utils.compute_params import IDWBuildParams, KrigingBuildParams
+from evo_mcp.utils.compute_params import IDWBuildParams, KNNBuildParams, KrigingBuildParams
 from evo_mcp.utils.tool_support import MCPFeedback
 
 
 def test_compute_build_parameter_imports_remain_compatible():
     assert compute_tools.IDWBuildParams is IDWBuildParams
+    assert compute_tools.KNNBuildParams is KNNBuildParams
     assert compute_tools.KrigingBuildParams is KrigingBuildParams
 
 
@@ -134,9 +136,9 @@ def compute_server(monkeypatch, kriging_build_inputs):
     )
 
 
-@pytest.fixture(params=["kriging", "idw"])
+@pytest.fixture(params=["kriging", "idw", "knn"])
 def estimation_case(request, kriging_build_inputs, neighborhood_build_inputs):
-    models = {"kriging": KrigingParameters, "idw": IDWParameters}
+    models = {"kriging": KrigingParameters, "idw": IDWParameters, "knn": KNNParameters}
     return SimpleNamespace(
         name=request.param,
         inputs=kriging_build_inputs if request.param == "kriging" else neighborhood_build_inputs,
@@ -155,7 +157,7 @@ def test_idw_rejects_invalid_power(neighborhood_build_inputs, power):
         IDWBuildParams(**neighborhood_build_inputs, power=power)
 
 
-@pytest.mark.parametrize("model", [IDWBuildParams])
+@pytest.mark.parametrize("model", [IDWBuildParams, KNNBuildParams])
 @pytest.mark.parametrize("limits", [{"max_samples": 0}, {"min_samples": 0}, {"min_samples": -1}, {"min_samples": 21}])
 def test_neighborhood_estimation_rejects_invalid_sample_limits(neighborhood_build_inputs, model, limits):
     inputs = {
@@ -164,6 +166,12 @@ def test_neighborhood_estimation_rejects_invalid_sample_limits(neighborhood_buil
     }
     with pytest.raises(ValidationError, match="samples must be"):
         model(**inputs)
+
+
+@pytest.mark.parametrize("field", ["power", "variogram_object_id", "method", "block_discretization"])
+def test_knn_rejects_unsupported_options(neighborhood_build_inputs, field):
+    with pytest.raises(ValidationError, match=field):
+        KNNBuildParams(**neighborhood_build_inputs, **{field: "unsupported"})
 
 
 @pytest.mark.asyncio
@@ -192,11 +200,11 @@ def estimation_result(compute_server, attribute="estimate"):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", ["kriging", "idw"])
+@pytest.mark.parametrize("name", ["kriging", "idw", "knn"])
 async def test_compute_uses_sdk_dispatch(
     compute_server, kriging_build_inputs, neighborhood_build_inputs, monkeypatch, name
 ):
-    inputs = {"kriging": kriging_build_inputs, "idw": neighborhood_build_inputs}[name]
+    inputs = {"kriging": kriging_build_inputs, "idw": neighborhood_build_inputs, "knn": neighborhood_build_inputs}[name]
     rotation = {"dip_azimuth": 45.0, "dip": 30.0, "pitch": 10.0}
     condition = {"where": {"type": "condition", "attribute": "grade", "operator": "greater_than", "threshold": 0.0}}
     inputs = {
@@ -250,12 +258,12 @@ async def test_compute_uses_sdk_dispatch(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", ["kriging", "idw"])
+@pytest.mark.parametrize("name", ["kriging", "idw", "knn"])
 @pytest.mark.parametrize("boundary", ["build", "run"])
 async def test_compute_rejects_zero_minimum_samples(
     compute_server, kriging_build_inputs, neighborhood_build_inputs, name, boundary
 ):
-    inputs = {"kriging": kriging_build_inputs, "idw": neighborhood_build_inputs}[name]
+    inputs = {"kriging": kriging_build_inputs, "idw": neighborhood_build_inputs, "knn": neighborhood_build_inputs}[name]
     arguments = {"workspace_id": compute_server.workspace_id}
     if boundary == "build":
         arguments["params"] = {**inputs, "search": {**inputs["search"], "min_samples": 0}}
@@ -315,11 +323,11 @@ async def test_estimation_filters_survive_build_and_run(compute_server, estimati
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", ["kriging", "idw"])
+@pytest.mark.parametrize("name", ["kriging", "idw", "knn"])
 async def test_compute_resolves_nested_filter_names(
     compute_server, kriging_build_inputs, neighborhood_build_inputs, name
 ):
-    inputs = {"kriging": kriging_build_inputs, "idw": neighborhood_build_inputs}[name]
+    inputs = {"kriging": kriging_build_inputs, "idw": neighborhood_build_inputs, "knn": neighborhood_build_inputs}[name]
     condition = {"type": "condition", "attribute": "grade", "operator": "greater_than", "threshold": 0.0}
     expression = "locations.attributes[?name=='grade']"
     source_filter = {
@@ -339,7 +347,7 @@ async def test_compute_resolves_nested_filter_names(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", ["kriging", "idw"])
+@pytest.mark.parametrize("name", ["kriging", "idw", "knn"])
 @pytest.mark.parametrize(
     "field, available",
     [("source_filter", "grade"), ("target_filter", "domain")],
@@ -347,7 +355,7 @@ async def test_compute_resolves_nested_filter_names(
 async def test_compute_rejects_missing_filter_attribute(
     compute_server, kriging_build_inputs, neighborhood_build_inputs, name, field, available
 ):
-    inputs = {"kriging": kriging_build_inputs, "idw": neighborhood_build_inputs}[name]
+    inputs = {"kriging": kriging_build_inputs, "idw": neighborhood_build_inputs, "knn": neighborhood_build_inputs}[name]
     missing_filter = {
         "where": {
             "type": "all_of",
@@ -502,7 +510,10 @@ async def test_estimation_search_rotation_survives_build_and_run(compute_server,
     assert backend["neighborhood"]["ellipsoid"]["rotation"] == ROTATION
 
 
-@pytest.mark.parametrize("model, fixture_name", [(KrigingBuildParams, "kriging"), (IDWBuildParams, "neighborhood")])
+@pytest.mark.parametrize(
+    "model, fixture_name",
+    [(KrigingBuildParams, "kriging"), (IDWBuildParams, "neighborhood"), (KNNBuildParams, "neighborhood")],
+)
 def test_build_models_preserve_rotation_and_reject_typos_directly(
     kriging_build_inputs, neighborhood_build_inputs, model, fixture_name
 ):
@@ -556,7 +567,7 @@ async def test_estimation_run_rejects_unknown_fields(compute_server, estimation_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool", ["idw"])
+@pytest.mark.parametrize("tool", ["idw", "knn"])
 @pytest.mark.parametrize(
     "override",
     [

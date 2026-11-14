@@ -9,6 +9,7 @@ from typing import Annotated, Any
 
 from evo.compute.tasks.common import Filter, SearchNeighborhood
 from evo.compute.tasks.geostatistics.idw import IDWParameters
+from evo.compute.tasks.geostatistics.knn import KNNParameters
 from evo.compute.tasks.geostatistics.kriging import (
     BlockDiscretization,
     KrigingParameters,
@@ -139,6 +140,10 @@ class IDWBuildParams(NeighborhoodBuildParams):
     )
 
 
+class KNNBuildParams(NeighborhoodBuildParams):
+    """Inputs for the arithmetic mean of accepted nearest neighbors."""
+
+
 def _check_kriging_scenario(scenario: KrigingParameters) -> KrigingParameters:
     _check_sample_limits(scenario.search)
     return scenario
@@ -151,9 +156,16 @@ def _check_idw_scenario(scenario: IDWParameters) -> IDWParameters:
     return scenario
 
 
+def _check_knn_scenario(scenario: KNNParameters) -> KNNParameters:
+    _check_sample_limits(scenario.neighborhood)
+    return scenario
+
+
 KrigingBuildInput = Annotated[KrigingBuildParams, _strict_validator(KrigingBuildParams)]
 IDWBuildInput = Annotated[IDWBuildParams, _strict_validator(IDWBuildParams)]
+KNNBuildInput = Annotated[KNNBuildParams, _strict_validator(KNNBuildParams)]
 KrigingScenario = Annotated[
     KrigingParameters, _strict_validator(KrigingParameters), AfterValidator(_check_kriging_scenario)
 ]
 IDWScenario = Annotated[IDWParameters, _strict_validator(IDWParameters), AfterValidator(_check_idw_scenario)]
+KNNScenario = Annotated[KNNParameters, _strict_validator(KNNParameters), AfterValidator(_check_knn_scenario)]

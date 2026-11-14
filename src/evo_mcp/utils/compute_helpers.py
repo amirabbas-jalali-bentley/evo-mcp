@@ -14,6 +14,7 @@ from evo.common import StaticContext
 from evo.compute.tasks import run as run_compute
 from evo.compute.tasks.common import Filter, FilterCondition, FilterExpression, Source
 from evo.compute.tasks.geostatistics.idw import IDWParameters
+from evo.compute.tasks.geostatistics.knn import KNNParameters
 from evo.compute.tasks.geostatistics.kriging import KrigingParameters
 from evo.objects import ObjectReference
 from evo.objects.typed import object_from_uuid
@@ -21,7 +22,7 @@ from evo.widgets import format_task_result_with_target
 from fastmcp import Context
 
 from evo_mcp.context import get_evo_context
-from evo_mcp.utils.compute_params import IDWBuildParams, KrigingBuildParams, NeighborhoodBuildParams
+from evo_mcp.utils.compute_params import IDWBuildParams, KNNBuildParams, KrigingBuildParams, NeighborhoodBuildParams
 from evo_mcp.utils.tool_support import MCPFeedback, build_links_from_metadata, get_workspace_environment
 
 
@@ -183,6 +184,19 @@ async def build_idw_parameters(workspace_id: str, params: IDWBuildParams) -> dic
         target=target,
         neighborhood=params.search,
         power=params.power,
+        source_filter=source_filter,
+        target_filter=target_filter,
+    )
+    return _normalize_neighborhood_payload(payload.model_dump(mode="json"))
+
+
+async def build_knn_parameters(workspace_id: str, params: KNNBuildParams) -> dict[str, Any]:
+    """Resolve published objects and construct a round-trippable KNN payload."""
+    source, target, source_filter, target_filter = await _resolve_estimation_inputs(workspace_id, params)
+    payload = KNNParameters(
+        source=source,
+        target=target,
+        neighborhood=params.search,
         source_filter=source_filter,
         target_filter=target_filter,
     )
