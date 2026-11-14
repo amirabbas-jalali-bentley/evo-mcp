@@ -19,7 +19,7 @@ All compute tools use the same build → inspect → run flow:
 - Every referenced object must belong to the `workspace_id` passed to the run
   tool, on the same hub and instance.
 - Scenarios in one run call must write to distinct outputs: distinct target
-  attributes for kriging, IDW, and KNN.
+  attributes for kriging, IDW, and KNN; distinct target grids for ConSim.
 
 ## Inverse distance weighting (IDW)
 
@@ -54,6 +54,58 @@ must be between one and `max_samples`.
 
 The runner reports progress and returns created/updated attribute references
 and links in scenario order. Use distinct output attributes for comparisons.
+
+## Conditional simulation (ConSim)
+
+Use `consim_build_parameters(workspace_id, params)` followed by
+`consim_run(workspace_id, scenarios)`. This wraps the SDK's high-level `consim`
+task: Evo handles normal-score transformation, conditioning kriging,
+turning-bands simulation, back-transformation, and requested statistics/reporting.
+MCP does not implement the numerical algorithms or download all realizations.
+
+Required inputs are `point_set_object_id`, an existing numeric
+`point_set_attribute`, `target_object_id`, `variogram_object_id`, and `search`.
+The source must be a published PointSet, the target a Regular3DGrid or
+RegularMasked3DGrid, and the variogram a published Variogram. Local staged edits
+must be published first. Use a variogram compatible with the simulation's
+normal-score modelling workflow; schema validation does not establish scientific
+suitability.
+
+Controls include:
+
+- `number_of_simulations`: 1-100, default 1.
+- `number_of_simulations_to_save`: 0 through the generated count, default 1.
+  Zero publishes summary statistics without saving the realization ensemble;
+  it cannot be combined with `perform_validation=true`.
+- `number_of_lines`: 1-1000, default 500.
+- `random_seed`: default 38239342, passed through for reproducibility.
+- `kriging_method`: `simple` (default) or `ordinary` for conditioning.
+- `block_discretization`: `nx`, `ny`, `nz`; defaults to one in each direction.
+- `source_filter` and `target_filter`: optional domain/sample restrictions.
+- `distribution`: optional `weights_attribute`, an existing numeric source
+    attribute such as declustering weights, and `tail_extrapolation` settings.
+- `location_wise_quantiles`: optional quantiles in [0, 1].
+- `probability_above_cutoff` and `mean_above_cutoff`: optional finite cutoffs.
+- `perform_validation`: optional validation, default false. `report_context`
+  and `report_mean_thresholds` require this to be true. At least one realization
+  must be saved when validation is enabled.
+
+The SDK does not accept octant, quadrant, or drillhole search limits for ConSim.
+The builder does not expose a single `target_attribute`: simulation creates
+multiple output attributes. Economic loss-calculation configuration is not
+exposed by this builder.
+
+Results contain the target locator, mean/variance/min/max attribute references,
+the saved ensemble reference when requested, optional quantile/cutoff references,
+validation summary/report reference, and portal/viewer/dashboard links. The SDK
+0.0.6 validation-report reference is read from its stored result model because
+that SDK version does not expose a public report property.
+
+The runner waits for completion and forwards progress. Concurrent ConSim
+scenarios must use distinct target objects to avoid conflicting output writes.
+These are real compute jobs, not dry runs: grid size, simulation count, line
+count, and discretization affect runtime and storage. Validate simulation
+statistics and conditioning against representative data before production use.
 
 ## Kriging
 

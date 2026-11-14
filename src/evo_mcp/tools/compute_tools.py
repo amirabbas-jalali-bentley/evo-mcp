@@ -9,18 +9,28 @@ from typing import Any
 from fastmcp import Context
 
 from evo_mcp.utils.compute_helpers import (
+    build_consim_parameters,
     build_idw_parameters,
     build_knn_parameters,
     build_kriging_parameters,
+    run_consim_scenarios,
     run_estimation_scenarios,
 )
 from evo_mcp.utils.compute_params import (
+    ConSimBuildInput,
+    ConSimScenario,
     IDWBuildInput,
     IDWScenario,
     KNNBuildInput,
     KNNScenario,
     KrigingBuildInput,
     KrigingScenario,
+)
+from evo_mcp.utils.compute_params import (
+    ConSimBuildParams as ConSimBuildParams,
+)
+from evo_mcp.utils.compute_params import (
+    ConSimDistributionInput as ConSimDistributionInput,
 )
 from evo_mcp.utils.compute_params import (
     IDWBuildParams as IDWBuildParams,
@@ -77,6 +87,17 @@ def register_compute_tools(mcp) -> None:
         return await build_knn_parameters(workspace_id, params)
 
     @mcp.tool()
+    async def consim_build_parameters(workspace_id: str, params: ConSimBuildInput) -> dict[str, Any]:
+        """Build conditional simulation (ConSim) parameters for consim_run.
+
+        Resolve a published point set, target 3D grid, and variogram. Configure
+        conditioning, normal-score transformation, turning bands, and optional
+        quantiles/cutoff statistics and validation. Returns inspectable JSON;
+        does not execute simulation or publish local staged edits.
+        """
+        return await build_consim_parameters(workspace_id, params)
+
+    @mcp.tool()
     async def idw_run(workspace_id: str, scenarios: list[IDWScenario], ctx: Context) -> dict[str, Any]:
         """Run inverse distance weighting (IDW) estimation scenarios in parallel.
 
@@ -95,6 +116,19 @@ def register_compute_tools(mcp) -> None:
         references and viewer links in input order, reporting progress.
         """
         return await run_estimation_scenarios(workspace_id, scenarios, ctx)
+
+    @mcp.tool()
+    async def consim_run(workspace_id: str, scenarios: list[ConSimScenario], ctx: Context) -> dict[str, Any]:
+        """Run conditional simulation (ConSim) scenarios in parallel on Evo.
+
+        Accept configurations from consim_build_parameters. Evo performs the
+        normal-score transform, conditioning and turning-bands simulation,
+        back-transform, and requested statistics/reporting. Writes published
+        target grids and returns ensemble/statistic references, not realization
+        values. Simulation count, grid size, lines, and discretization affect
+        runtime and storage. Progress is reported until completion.
+        """
+        return await run_consim_scenarios(workspace_id, scenarios, ctx)
 
     @mcp.tool()
     async def kriging_run(
