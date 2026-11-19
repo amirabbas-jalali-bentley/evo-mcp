@@ -11,6 +11,7 @@ from typing import Annotated, Any
 
 from evo.compute.tasks.common import Filter, SearchNeighborhood
 from evo.compute.tasks.geostatistics.idw import IDWParameters
+from evo.compute.tasks.geostatistics.knn import KNNParameters
 from evo.compute.tasks.geostatistics.kriging import (
     BlockDiscretization,
     KrigingParameters,
@@ -295,6 +296,10 @@ class IDWBuildParams(NeighborhoodBuildParams):
     )
 
 
+class KNNBuildParams(NeighborhoodBuildParams):
+    """Inputs for the arithmetic mean of accepted nearest neighbors."""
+
+
 def _check_idw_scenario(scenario: IDWParameters) -> IDWParameters:
     if not math.isfinite(scenario.power):
         raise ValueError("power must be finite.")
@@ -303,6 +308,7 @@ def _check_idw_scenario(scenario: IDWParameters) -> IDWParameters:
 
 KrigingBuildInput = Annotated[KrigingBuildParams, BeforeValidator(_strict_model_validator(KrigingBuildParams))]
 IDWBuildInput = Annotated[IDWBuildParams, BeforeValidator(_strict_model_validator(IDWBuildParams))]
+KNNBuildInput = Annotated[KNNBuildParams, BeforeValidator(_strict_model_validator(KNNBuildParams))]
 KrigingScenario = Annotated[
     KrigingParameters,
     BeforeValidator(_validate_kriging_scenario),
@@ -312,5 +318,10 @@ IDWScenario = Annotated[
     IDWParameters,
     BeforeValidator(_strict_model_validator(IDWParameters)),
     AfterValidator(_check_idw_scenario),
+    _AcceptEllipsoidAliasesSchema(),
+]
+KNNScenario = Annotated[
+    KNNParameters,
+    BeforeValidator(_strict_model_validator(KNNParameters)),
     _AcceptEllipsoidAliasesSchema(),
 ]
