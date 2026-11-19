@@ -34,5 +34,5 @@ MCP tool groups.
 
 | File | Description |
 |---|---|
-| [compute-tools.md](tools/compute-tools.md) | Kriging, IDW, and KNN build + run tools |
+| [compute-tools.md](tools/compute-tools.md) | Kriging, IDW, KNN, and conditional simulation build + run tools |
 
